@@ -290,8 +290,8 @@
     /* ========================================================================
        KONFIGURASI UTAMA
        ======================================================================== */
-    const IS_PREVIEW = false; // Set true untuk melihat UI tanpa backend GAS.
-    const GAS_URL = "https://script.google.com/macros/s/AKfycbwpRC8Ag3LtrG3caTrV50NL4mmz2rVOeRKElkfQMIa_nduSedLR5j7LYz4Rd9i150CrjA/exec"; 
+    const IS_PREVIEW = fasle; // Set true untuk melihat UI tanpa backend GAS.
+    const GAS_URL = "https://script.google.com/macros/s/AKfycby286kk0-davvVT2xsB_Sj-PhMdJc63ea5SmZJNWPidXGuwqjYwaVB614lVyhFW2FBW/exec"; 
 
     // State Global
     let currentUser = null;
@@ -1471,13 +1471,17 @@
 
     function simpanPengaturan(btnElement) {
         const origHTML = btnElement.innerHTML; btnElement.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Menyimpan...`; btnElement.disabled = true;
-        setTimeout(async () => {
-            dbState.pengaturan.namaInstansi = document.getElementById('set-nama').value; dbState.pengaturan.alamatInstansi = document.getElementById('set-alamat').value;
-            dbState.pengaturan.maintenanceMode = document.getElementById('set-maintenance').checked; dbState.pengaturan.logoBase64 = tempLogoBase64;
-            await syncToGAS('pengaturan');
-            updateSidebarLogo(); addLog('Mengubah pengaturan sistem'); showToast('Pengaturan berhasil disimpan!');
-            btnElement.innerHTML = origHTML; btnElement.disabled = false;
-        }, 800);
+        
+        // OPTIMASI: Langsung eksekusi tanpa delay buatan (setTimeout)
+        dbState.pengaturan.namaInstansi = document.getElementById('set-nama').value; 
+        dbState.pengaturan.alamatInstansi = document.getElementById('set-alamat').value;
+        dbState.pengaturan.maintenanceMode = document.getElementById('set-maintenance').checked; 
+        dbState.pengaturan.logoBase64 = tempLogoBase64;
+        
+        syncToGAS('pengaturan'); // Eksekusi berjalan cepat di background (Optimistic UI)
+        
+        updateSidebarLogo(); addLog('Mengubah pengaturan sistem'); showToast('Pengaturan berhasil disimpan!');
+        btnElement.innerHTML = origHTML; btnElement.disabled = false;
     }
 
     function backupDataJSON() {
@@ -1683,7 +1687,10 @@
             const katId = document.getElementById('form-kat-id').value; const katNama = document.getElementById('form-kat-nama').value; const klasInduk = document.getElementById('form-kat-klasifikasi').value;
             if (!klasInduk) { showToast('Mohon pilih Klasifikasi Induk!', true); btn.disabled = false; btn.innerText = originalText; return; }
             const data = { id: katId, nama: katNama, klasifikasi: klasInduk, desc: document.getElementById('form-kat-desc').value };
-            await callGAS('createCategoryFolders', { categoryName: katNama, klasifikasiName: klasInduk });
+            
+            // OPTIMASI: Tidak di-await agar modal langsung tertutup instan
+            callGAS('createCategoryFolders', { categoryName: katNama, klasifikasiName: klasInduk }); 
+            
             if (isEdit) { const idx = dbState.kategori.findIndex(k => String(k.id) === String(katId)); if(idx !== -1) dbState.kategori[idx] = data; } else { dbState.kategori.unshift(data); }
             addLog(`Kelola Kategori: ${katNama}`); showToast('Kategori disimpan & Folder disiapkan');
         }
@@ -1692,7 +1699,9 @@
             if (isEdit) { let index = dbState.klasifikasi.findIndex(k => String(k.kode) === String(kodeKlas)); if (index !== -1) { dbState.klasifikasi[index].nama = namaKlas; dbState.klasifikasi[index].retensiAktif = retAktif; dbState.klasifikasi[index].retensiInaktif = retInaktif; dbState.klasifikasi[index].nasibAkhir = nasib; } } else {
                 if (dbState.klasifikasi.some(k => String(k.kode) === String(kodeKlas))) { showToast('Kode sudah digunakan!', true); btn.disabled = false; btn.innerText = originalText; return; }
                 dbState.klasifikasi.unshift({ kode: kodeKlas, nama: namaKlas, retensiAktif: retAktif, retensiInaktif: retInaktif, nasibAkhir: nasib });
-                await callGAS('createKlasifikasiFolder', { klasifikasiName: kodeKlas });
+                
+                // OPTIMASI: Tidak di-await agar pembuatan folder tidak menghambat UI pengguna
+                callGAS('createKlasifikasiFolder', { klasifikasiName: kodeKlas });
             }
             addLog(isEdit ? `Update JRA ${kodeKlas}` : `Tambah Klasifikasi: ${kodeKlas}`); showToast('Klasifikasi Berhasil Disimpan!');
         }
@@ -1712,7 +1721,8 @@
         }
         addLog(`Kelola Pengguna: ${userId}`); showToast('Data pengguna disimpan!');
     }
-    await syncToGAS(modul);
+    
+    syncToGAS(modul); // OPTIMASI: Berjalan di background (Optimistic Update), UI langsung melaju ke baris bawahnya
     btn.disabled = false; btn.innerText = originalText; closeModal(); switchMenu(modul);
 }
 
@@ -1800,21 +1810,34 @@ function confirmDelete(id, itemName, modul) {
         syncToGAS('logs');
     }
 
+    let syncTimeout = {}; // Tempat penyimpanan antrean proses background
+    
     async function syncToGAS(modul) {
         if (IS_PREVIEW) return;
         let actualModul = modul;
         if (modul === 'arsip_masuk' || modul === 'arsip_keluar') actualModul = 'arsip';
-        let dataToSync = dbState[actualModul];
-        if (modul === 'pengaturan') dataToSync = dbState.pengaturan;
-
-        // OPTIMASI: Langsung Update Cache Lokal saat data berubah agar web terasa tanpa jeda/loading sama sekali
+        
+        // Langsung Update Cache Lokal agar web terasa tanpa jeda/loading sama sekali
         localStorage.setItem('arsip_db_cache_v1', JSON.stringify(dbState));
 
-        try {
-            await callGAS('syncData', { modul: actualModul, data: dataToSync });
-        } catch(e) {
-            console.error("Gagal sinkronisasi ke GAS:", e);
+        // OPTIMASI KECEPATAN (API DEBOUNCING): 
+        // Hanya mengirim data ke Sheet jika user sudah tidak berinteraksi selama 1.5 detik. 
+        // Mencegah server error / limit request jika user menghapus atau menambah banyak data dengan cepat.
+        if (syncTimeout[actualModul]) {
+            clearTimeout(syncTimeout[actualModul]);
         }
+
+        syncTimeout[actualModul] = setTimeout(async () => {
+            let dataToSync = dbState[actualModul];
+            if (actualModul === 'pengaturan') dataToSync = dbState.pengaturan;
+
+            try {
+                await callGAS('syncData', { modul: actualModul, data: dataToSync });
+                console.log(`[GAS Sync] Database untuk ${actualModul} sukses dicadangkan ke Spreadsheet.`);
+            } catch(e) {
+                console.error("Gagal sinkronisasi ke GAS:", e);
+            }
+        }, 1500); 
     }
 
     function showToast(msg, isError = false) {
